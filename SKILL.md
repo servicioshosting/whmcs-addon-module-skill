@@ -69,7 +69,8 @@ repo-root/
 │   │   ├── Encrypter.php           # optional
 │   │   ├── Pagination.php          # optional / legacy HTML admin
 │   │   ├── MakesPagination.php     # optional / legacy HTML admin
-│   │   ├── RendersMessages.php     # optional flash/toast helper
+│   │   ├── FlashMessages.php       # recommended: session toast queue + Notyf
+│   │   ├── RendersMessages.php     # optional thin trait → FlashMessages
 │   │   ├── Admin/AdminDispatcher.php, Controller.php, AdminService.php
 │   │   ├── Client/ClientDispatcher.php, Controller.php   # if client area
 │   │   └── <Model>.php             # Eloquent models as needed
@@ -373,6 +374,7 @@ Controller may render an SPA shell (iframe) **or** classic HTML. Both are valid.
 namespace WHMCS\Module\Addon\<Name>\Admin;
 
 use Symfony\Component\HttpFoundation\Request;
+use WHMCS\Module\Addon\<Name>\FlashMessages;
 use WHMCS\Module\Addon\<Name>\LoggerUtil;
 use WHMCS\Module\Addon\<Name>\Module;
 use WHMCS\Module\Addon\<Name>\RendersMessages;
@@ -444,10 +446,11 @@ class Controller
     {
         try {
             $result = (new AdminService())->save($_POST);
-            $_SESSION['<Prefix>.message'] = $result['message'];
+            $msg = $result['message'] ?? ['type' => 'success', 'text' => 'Saved'];
+            FlashMessages::push($msg['type'] ?? 'success', $msg['text'] ?? 'Saved');
         } catch (\Throwable $th) {
             LoggerUtil::get()->error('Error saving item', ['ex' => $th]);
-            $_SESSION['<Prefix>.message'] = ['type' => 'error', 'text' => 'Unexpected error'];
+            FlashMessages::push('error', 'Unexpected error');
         }
         header('Location: ' . $this->safeReferrer(Request::createFromGlobals()));
         exit;
@@ -479,6 +482,7 @@ class Controller
 
 namespace WHMCS\Module\Addon\<Name>\Admin;
 
+use WHMCS\Module\Addon\<Name>\FlashMessages;
 use WHMCS\Module\Addon\<Name>\Item; // your Eloquent model
 
 class AdminService
@@ -488,12 +492,10 @@ class AdminService
         if (empty($_SESSION['<Prefix>.csrf'])) {
             $_SESSION['<Prefix>.csrf'] = bin2hex(random_bytes(32));
         }
-        $flash = $_SESSION['<Prefix>.message'] ?? null;
-        unset($_SESSION['<Prefix>.message']);
 
         return [
-            'csrf'  => $_SESSION['<Prefix>.csrf'],
-            'flash' => $flash,
+            'csrf'     => $_SESSION['<Prefix>.csrf'],
+            'messages' => FlashMessages::consume(),
             // plus any config the SPA needs (non-secret)
         ];
     }
@@ -959,12 +961,122 @@ Procedural helpers required by entry file and lib classes: status-code constants
 `getMessage($code)` → flash arrays, redirects, pure domain functions. Loaded via
 `require_once` from `Module.php`. Keep it free of side effects at include time.
 
-## Flash messages (lib/RendersMessages.php)
+## Flash messages (lib/FlashMessages.php) — canonical
 
-Controllers `use RendersMessages`; queue with `$this->success()/error()/info()/warning()`
-then emit a small script that fires toasts (e.g. Notyf). Session flash for redirects:
-`$_SESSION['<Prefix>.message'] = ['type' => ..., 'text' => ...]`. SPA can also receive
-flash via `bootstrap().flash`.
+One session queue for **all** toast paths (redirects, hooks, SPA bootstrap, classic
+admin shell). Never use a singular `$_SESSION['<Prefix>.message']`.
+
+| Piece | Pattern |
+|-------|---------|
+| Session | `$_SESSION['<Prefix>.messages']` = list of `{type, text}` |
+| API | `FlashMessages::push` / `consume` / `label` / `renderScript` |
+| Label | toast text = `[{Display Name}] {text}` so admins know which addon spoke |
+| WHMCS page | `renderScript()` defines `window.<Prefix>_messages` → Notyf |
+| Assets | Notyf CSS/JS via hooks; `assets/app.js` inits Notyf + calls `<Prefix>_messages` on load |
+| SPA | `bootstrap().messages` = `FlashMessages::consume()`; SPA toast helper applies same label |
+| Trait | `RendersMessages` = thin sugar (`success`/`error`/`info`/`warning` → `push`; `renderMessages()` → `renderScript()`) |
+
+```php
+<?php
+
+namespace WHMCS\Module\Addon\<Name>;
+
+class FlashMessages
+{
+    public const SESSION_KEY = '<Prefix>.messages';
+    public const LABEL = 'Display Name'; // same friendly name as _config()['name']
+
+    public static function push(string $type, string $text): void
+    {
+        if (!isset($_SESSION[self::SESSION_KEY]) || !is_array($_SESSION[self::SESSION_KEY])) {
+            $_SESSION[self::SESSION_KEY] = [];
+        }
+        $_SESSION[self::SESSION_KEY][] = ['type' => $type, 'text' => $text];
+    }
+
+    /** @return list<array{type: string, text: string}> */
+    public static function consume(): array
+    {
+        $messages = $_SESSION[self::SESSION_KEY] ?? [];
+        unset($_SESSION[self::SESSION_KEY]);
+        if (!is_array($messages)) {
+            return [];
+        }
+        $out = [];
+        foreach ($messages as $message) {
+            if (!is_array($message) || empty($message['text'])) {
+                continue;
+            }
+            $out[] = [
+                'type' => (string) ($message['type'] ?? 'info'),
+                'text' => (string) $message['text'],
+            ];
+        }
+        return $out;
+    }
+
+    public static function label(string $text): string
+    {
+        return '[' . self::LABEL . '] ' . $text;
+    }
+
+    /** @param list<array{type: string, text: string}>|null $messages */
+    public static function renderScript(?array $messages = null): string
+    {
+        $messages ??= self::consume();
+        if ($messages === []) {
+            return '';
+        }
+        $calls = [];
+        foreach ($messages as $message) {
+            $type = json_encode((string) ($message['type'] ?? 'info'), JSON_UNESCAPED_UNICODE);
+            $text = json_encode(self::label((string) $message['text']), JSON_UNESCAPED_UNICODE);
+            $calls[] = "window.notyf.open({ type: {$type}, message: {$text} });";
+        }
+        $body = implode("\n            ", $calls);
+        return <<<HTML
+        <script type="text/javascript">
+          window.<Prefix>_messages = function () {
+            if (!window.notyf) return;
+            {$body}
+          };
+        </script>
+        HTML;
+    }
+}
+```
+
+```php
+<?php
+
+namespace WHMCS\Module\Addon\<Name>;
+
+trait RendersMessages
+{
+    protected function success($msg) { FlashMessages::push('success', (string) $msg); }
+    protected function error($msg) { FlashMessages::push('error', (string) $msg); }
+    protected function info($msg) { FlashMessages::push('info', (string) $msg); }
+    protected function warning($msg) { FlashMessages::push('warning', (string) $msg); }
+    protected function message($msg) { $this->info($msg); }
+    protected function renderMessages() { return FlashMessages::renderScript(); }
+}
+```
+
+**Writers:** standalone endpoints (`actions.php`, webhooks that redirect), hooks, and
+controllers all call `FlashMessages::push(...)`. After a redirect, the landing page
+emits `FlashMessages::renderScript()` (admin shell via `renderMessages()`, or a page
+hook such as `AdminAreaClientSummaryPage`).
+
+**Drain (WHMCS page):** `assets/app.js` must call `window.<Prefix>_messages()` after
+Notyf is constructed (typically on `window` `load`). Clipboard / other in-page toasts
+from this addon should also prefix with `[Display Name]`.
+
+**Drain (SPA):** `bootstrap` returns `messages`; the SPA toast helper prefixes the same
+label and fires Notyf (iframe-local or `parent.notyf`). Mutating API ops may still return
+an inline `{type, text}` in the JSON body for immediate toast without session.
+
+Do **not** double-consume: if the parent shell already called `renderScript()` /
+`consume()`, SPA `bootstrap` will see an empty list (parent Notyf already showed them).
 
 ## Optional / legacy helpers
 
@@ -1033,6 +1145,11 @@ async function request<T>(op: string, options: RequestOptions = {}): Promise<T> 
 Iframe bridge — PHP shell listens for `<Prefix>:height` and `<Prefix>:navigation`;
 SPA emits them. Guard with `IN_IFRAME = window.self !== window.top` so `pnpm dev`
 works standalone.
+
+Flash / toasts — bootstrap returns `messages` (from `FlashMessages::consume()`). SPA
+toast helper must prefix `[Display Name]` like PHP `FlashMessages::label()`. Prefer
+iframe-local Notyf (CDN in SPA `index.html`) so standalone `pnpm/npm run dev` works;
+fall back to `parent.notyf` when useful. See **Flash messages** above.
 
 Views in `src/views/*.svelte`; tiny router in `src/lib/router.ts`. Deploy builds
 first: `(cd admin-ui && pnpm run build)` before rsync.
@@ -1114,6 +1231,7 @@ When creating a new addon from scratch:
 3. Add logging if the module does non-trivial work.
 4. Add tables/models only if needed; keep activate ↔ upgrade in sync.
 5. Choose classic admin HTML **or** SPA + `controllers/admin.php` + `AdminService`.
-6. Add hooks for assets and any cron/domain events.
-7. Add webhook / Api / Encrypter / client AJAX endpoint only when required.
-8. Wire IDE-only `composer.json` PSR-4 + `stubs.php`; never deploy them.
+6. Add `FlashMessages` (+ optional `RendersMessages`) and Notyf via hooks/`assets/app.js` when the module shows admin feedback.
+7. Add hooks for assets and any cron/domain events.
+8. Add webhook / Api / Encrypter / client AJAX endpoint only when required.
+9. Wire IDE-only `composer.json` PSR-4 + `stubs.php`; never deploy them.
