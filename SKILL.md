@@ -5,7 +5,9 @@ description: >
   (_config/_activate/_upgrade/_output/_clientarea), PSR-4 lib/ with Module
   singleton + Admin/Client dispatchers and services, Eloquent models, Monolog
   logging, optional standalone JSON endpoints, optional HMAC webhooks, hooks.php
-  patterns, and an optional Svelte+Vite admin SPA. Self-contained — do not read
+  patterns, and an optional Svelte+Vite admin SPA (TanStack Svelte Query,
+  Tailwind v4 + bits-ui unified theme, skeleton loaders, shared lib/ui
+  components, hash filters/pagination patterns). Self-contained — do not read
   example addons to scaffold. Use when user says "create whmcs addon", "new
   whmcs module", "scaffold addon module", "whmcs addon", or works inside a WHMCS
   modules repo (addons/, gateways/, admin-ui/, push.sh/pull.sh layout).
@@ -1088,71 +1090,37 @@ Do **not** double-consume: if the parent shell already called `renderScript()` /
 
 ## Optional: Admin SPA (Svelte + Vite)
 
-Source in `admin-ui/` (own pnpm workspace). Build output lands INSIDE the module
-so only built files deploy:
+Source in `admin-ui/` (own pnpm workspace). Build output lands **inside** the module
+(`addons/<Name>/assets/admin/`) so only built files deploy.
 
-```ts
-// admin-ui/vite.config.ts
-import { defineConfig } from 'vite';
-import { svelte } from '@sveltejs/vite-plugin-svelte';
+**Stack (required for new SPAs):**
 
-export default defineConfig({
-  plugins: [svelte()],
-  base: '/modules/addons/<Name>/assets/admin/',
-  build: {
-    outDir: '../addons/<Name>/assets/admin',
-    emptyOutDir: true,
-  },
-  server: { port: 5173 },
-});
-```
+| Layer | Choice |
+|-------|--------|
+| UI | Svelte 5 runes + Vite 7 |
+| Data | `@tanstack/svelte-query` (`createQuery` / `createMutation`) |
+| Look | Tailwind CSS v4 (`@tailwindcss/vite`) + CSS vars theme `whmcs` |
+| Behavior / a11y | `bits-ui` (Dialog, Tabs, …) — **only** via `src/lib/ui/*` wrappers |
+| Components | One per role under `src/lib/ui/` (`Button`, `Badge`, `DataTable`, `Pager`, …) |
 
-API client sketch:
+**Scaffold:** copy `templates/admin-ui/` → project `admin-ui/`, replace `<Name>` /
+`<Prefix>` / display name, then extend views. Do not invent one-off button/modal
+styles in views — extend wrappers.
 
-```ts
-const API_BASE = new URL('../../controllers/admin.php', window.location.href).toString();
-let csrfToken: string | null = null;
+**Docs (read these when building SPA UI):**
 
-export function bootstrap(): Promise<BootstrapData> {
-  return request<BootstrapData>('bootstrap').then((data) => {
-    csrfToken = data.csrf;
-    return data;
-  });
-}
+| File | Contents |
+|------|----------|
+| `references/admin-spa.md` | Vite, iframe bridge, `api.ts`, TanStack, skeletons, anti-patterns |
+| `references/admin-ui-theme.md` | Tailwind + bits-ui install, `app.css` tokens |
+| `references/admin-ui-components.md` | Unified component catalog + creation rule |
+| `references/admin-ui-patterns.md` | Hash filters, pagination `meta`, list + modal recipes |
 
-async function request<T>(op: string, options: RequestOptions = {}): Promise<T> {
-  const headers = new Headers();
-  if (csrfToken) headers.set('X-<Prefix>-CSRF', csrfToken);
-  if (options.method === 'POST') {
-    headers.set('Content-Type', 'application/json');
-  }
-  const url = new URL(API_BASE);
-  url.searchParams.set('op', op);
-  const res = await fetch(url, {
-    method: options.method ?? 'GET',
-    headers,
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
-  if (!res.ok) {
-    const err: any = new Error('Request failed');
-    err.status = res.status;
-    throw err;
-  }
-  return res.json();
-}
-```
+Flash / toasts still use bootstrap `messages` + Notyf — see **Flash messages** above.
+Classic HTML admin may use `Pagination` / `MakesPagination`; SPA lists use JSON
+`meta` + `<Pager>` only.
 
-Iframe bridge — PHP shell listens for `<Prefix>:height` and `<Prefix>:navigation`;
-SPA emits them. Guard with `IN_IFRAME = window.self !== window.top` so `pnpm dev`
-works standalone.
-
-Flash / toasts — bootstrap returns `messages` (from `FlashMessages::consume()`). SPA
-toast helper must prefix `[Display Name]` like PHP `FlashMessages::label()`. Prefer
-iframe-local Notyf (CDN in SPA `index.html`) so standalone `pnpm/npm run dev` works;
-fall back to `parent.notyf` when useful. See **Flash messages** above.
-
-Views in `src/views/*.svelte`; tiny router in `src/lib/router.ts`. Deploy builds
-first: `(cd admin-ui && pnpm run build)` before rsync.
+Deploy: `(cd admin-ui && pnpm run check && pnpm run build)` before rsync.
 
 ## composer.json (IDE-only) + stubs.php
 
@@ -1231,6 +1199,8 @@ When creating a new addon from scratch:
 3. Add logging if the module does non-trivial work.
 4. Add tables/models only if needed; keep activate ↔ upgrade in sync.
 5. Choose classic admin HTML **or** SPA + `controllers/admin.php` + `AdminService`.
+   SPA: copy `templates/admin-ui/`; wire TanStack Query + Tailwind + bits-ui theme;
+   use `lib/ui/*` + hash filter/pager patterns (see Admin SPA + `references/admin-ui-*.md`).
 6. Add `FlashMessages` (+ optional `RendersMessages`) and Notyf via hooks/`assets/app.js` when the module shows admin feedback.
 7. Add hooks for assets and any cron/domain events.
 8. Add webhook / Api / Encrypter / client AJAX endpoint only when required.
