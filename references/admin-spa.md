@@ -102,7 +102,11 @@ Safe GETs skip CSRF server-side; mutations require the header. Match PHP `contro
 
 ## Iframe bridge
 
-PHP shell listens for `<Prefix>:height` and `<Prefix>:navigation`; SPA emits them. Guard with `IN_IFRAME = window.self !== window.top` so `pnpm dev` works standalone. See `templates/admin-ui/src/lib/size.ts`.
+PHP shell listens for **`<Prefix>:height` only** — resize the iframe. SPA emits height via `templates/admin-ui/src/lib/size.ts` (`watchHeight` / `notifyHeight`). Guard with `IN_IFRAME = window.top !== window` so `pnpm/npm run dev` works standalone.
+
+**Do not** emit or handle `<Prefix>:navigation` / `pushHistory` that rewrites the parent WHMCS `?view=` query. With `getNavWindow()` the SPA already writes the **parent** `#view=…` hash; a second `?view=` sync fights that router (tabs/filters break). Accounts Miner hit this bug; fix is height-only shell + hash routing.
+
+Iframe `src`: `assets/admin/index.html?v={mtime}#view={default}` — cache-bust query, seed tab in iframe hash. On first paint `ensureRoute` / `readRoute` copy that into the parent hash when empty (also accept legacy iframe `?view=`).
 
 ## Flash / toasts
 
@@ -110,7 +114,7 @@ Bootstrap returns `messages` (from `FlashMessages::consume()`). Toast helper pre
 
 ## Router
 
-Tiny hash router in `src/lib/router.ts`: `#view=<tab>&…params`. Prefer parent-window hash when same-origin iframe (see Accounts Miner `getNavWindow` pattern). Views in `src/views/*.svelte`.
+Tiny hash router in `src/lib/router.ts`: `#view=<tab>&…params`. Prefer parent-window hash when same-origin iframe (`getNavWindow`). Views in `src/views/*.svelte`. Shell must **not** call a navigation `postMessage` — `writeRoute` alone updates the parent hash.
 
 Filter / pagination / modal-detail hash rules: **`admin-ui-patterns.md`**.
 

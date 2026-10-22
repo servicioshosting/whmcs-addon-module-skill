@@ -72,7 +72,12 @@ export function readRoute(): Route {
   const win = getNavWindow();
   let hash = rawHash(win);
 
+  // Parent hash empty: seed from iframe hash (#view=…) then legacy ?view=.
   if (!hash) {
+    const selfHash = window.location.hash.replace(/^#/, '').trim();
+    if (selfHash) {
+      return parseHash(selfHash);
+    }
     const queryView = new URLSearchParams(window.location.search).get('view');
     if (queryView) {
       return { view: normalizeView(queryView), params: {} };

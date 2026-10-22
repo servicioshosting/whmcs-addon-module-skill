@@ -402,8 +402,10 @@ class Controller
 
     protected function adminAppUrl($view, $hash = null)
     {
-        $suffix = "?view={$view}&v=" . $this->appVersion();
-        return self::ADMIN_APP_PATH . $suffix . ($hash ? '#' . $hash : '');
+        $view = $view ?: self::ADMIN_DEFAULT_VIEW;
+        $hashPart = $hash ?: ('view=' . rawurlencode($view));
+        // Cache-bust query only; initial tab in iframe hash. SPA seeds parent #view= via getNavWindow.
+        return self::ADMIN_APP_PATH . '?v=' . $this->appVersion() . '#' . $hashPart;
     }
 
     protected function appVersion()
@@ -412,14 +414,14 @@ class Controller
         return file_exists($built) ? (string) filemtime($built) : '1';
     }
 
-    protected function renderAdminShell($view, $hash = null)
+    protected function renderAdminShell($view = null, $hash = null)
     {
-        $view ??= self::ADMIN_DEFAULT_VIEW;
-        $hash = $_GET['view'] ?? null;
+        $view = $view ?: self::ADMIN_DEFAULT_VIEW;
+        $src = $this->adminAppUrl($view, $hash);
 
         return <<<HTML
     {$this->renderMessages()}
-    <iframe src="{$this->adminAppUrl($view, $hash)}" id="<prefix>-admin-frame"
+    <iframe src="{$src}" id="<prefix>-admin-frame"
       style="width: 100%; border: 0; display: block; min-height: 480px;"></iframe>
     <script type="text/javascript">
       (function () {
@@ -427,16 +429,11 @@ class Controller
           var f = document.getElementById('<prefix>-admin-frame');
           if (f) f.style.height = height + 'px';
         }
-        function pushHistory(view) {
-          var query = new URLSearchParams(window.location.search);
-          query.set('action', 'index');
-          query.set('view', view);
-          window.history.pushState({}, '', window.location.pathname + '?' + query.toString());
-        }
+        // Height only. SPA owns routing via parent #view=… (getNavWindow).
+        // Never sync WHMCS ?view= from postMessage — dual state breaks the hash router.
         window.addEventListener('message', function (e) {
           if (!e || !e.data) return;
           if (e.data.type === '<Prefix>:height') resize(e.data.height);
-          else if (e.data.type === '<Prefix>:navigation') pushHistory(e.data.view);
         });
       })();
     </script>
